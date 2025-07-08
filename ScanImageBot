@@ -61,7 +61,6 @@ func main() {
     }
 }
 
-// Скачивает файл по url (Go-реализация)
 func downloadFile(filepath string, url string) error {
     resp, err := http.Get(url)
     if err != nil {
@@ -79,12 +78,10 @@ func downloadFile(filepath string, url string) error {
     return err
 }
 
-// Запускает tesseract и возвращает текст
 func runTesseract(imagePath string) (string, error) {
     lang := "rus+eng"
     cmd := exec.Command("tesseract", imagePath, "stdout", "-l", lang)
     output, err := cmd.CombinedOutput()
-    // Убираем строки, начинающиеся на "Estimating" и "Error "
     lines := strings.Split(string(output), "\n")
     var resultLines []string
     for _, line := range lines {
@@ -92,7 +89,6 @@ func runTesseract(imagePath string) (string, error) {
         if trimmed == "" {
             continue
         }
-        // Фильтруем инфошум
         if strings.HasPrefix(trimmed, "Estimating") ||
             strings.HasPrefix(trimmed, "Error") ||
             strings.HasPrefix(trimmed, "Tesseract Open Source") ||

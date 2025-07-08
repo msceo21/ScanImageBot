@@ -1,0 +1,106 @@
+package main
+
+import (
+    "io"
+    "log"
+    "net/http"
+    "os"
+    "os/exec"
+    "strings"
+
+    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+)
+
+func main() {
+    bot, err := tgbotapi.NewBotAPI("yourTokenbot")
+    if err != nil {
+        log.Panic(err)
+    }
+
+    u := tgbotapi.NewUpdate(0)
+    u.Timeout = 60
+
+    updates := bot.GetUpdatesChan(u)
+
+    for update := range updates {
+        if update.Message == nil {
+            continue
+        }
+
+        if len(update.Message.Photo) > 0 {
+            photo := update.Message.Photo[len(update.Message.Photo)-1]
+            fileID := photo.FileID
+            file, err := bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
+            if err != nil {
+                bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка при получении файла"))
+                continue
+            }
+
+            localFile := "received_image.png"
+            url := file.Link(bot.Token)
+            err = downloadFile(localFile, url)
+            if err != nil {
+                bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка скачивания файла"))
+                continue
+            }
+
+            text, err := runTesseract(localFile)
+            if err != nil {
+                bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка при распознавании: "+err.Error()))
+            } else {
+                if strings.TrimSpace(text) == "" {
+                    text = "Текст не распознан"
+                }
+                bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, text))
+            }
+
+            os.Remove(localFile)
+        } else {
+            bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Пожалуйста, отправь фото для распознавания текста"))
+        }
+    }
+}
+
+// Скачивает файл по url (Go-реализация)
+func downloadFile(filepath string, url string) error {
+    resp, err := http.Get(url)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+
+    out, err := os.Create(filepath)
+    if err != nil {
+        return err
+    }
+    defer out.Close()
+
+    _, err = io.Copy(out, resp.Body)
+    return err
+}
+
+// Запускает tesseract и возвращает текст
+func runTesseract(imagePath string) (string, error) {
+    lang := "rus+eng"
+    cmd := exec.Command("tesseract", imagePath, "stdout", "-l", lang)
+    output, err := cmd.CombinedOutput()
+    // Убираем строки, начинающиеся на "Estimating" и "Error "
+    lines := strings.Split(string(output), "\n")
+    var resultLines []string
+    for _, line := range lines {
+        trimmed := strings.TrimSpace(line)
+        if trimmed == "" {
+            continue
+        }
+        // Фильтруем инфошум
+        if strings.HasPrefix(trimmed, "Estimating") ||
+            strings.HasPrefix(trimmed, "Error") ||
+            strings.HasPrefix(trimmed, "Tesseract Open Source") ||
+            strings.HasPrefix(trimmed, "OCR Engine") {
+            continue
+        }
+        resultLines = append(resultLines, trimmed)
+    }
+    result := strings.Join(resultLines, "\n")
+    return result, err
+}

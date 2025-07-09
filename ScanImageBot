@@ -1,21 +1,102 @@
 package main
 
 import (
-    "io"
+    "encoding/json"
+    "fmt"
+    "io/ioutil"
     "log"
     "net/http"
-    "os"
-    "os/exec"
-    "strings"
-
+    "net/url"   
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+func getCoordinatesNominatim(city string) (string, string, string, error) {
+    encodedCity := url.QueryEscape(city)
+    urlStr := fmt.Sprintf("https://nominatim.openstreetmap.org/search?format=json&q=%s", encodedCity)
+    req, _ := http.NewRequest("GET", urlStr, nil)
+    req.Header.Set("User-Agent", "weather-telegram-bot")
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return "", "", "", err
+    }
+    defer resp.Body.Close()
+    body, _ := ioutil.ReadAll(resp.Body)
+    var data []map[string]interface{}
+    if err := json.Unmarshal(body, &data); err != nil {
+        return "", "", "", err
+    }
+    if len(data) == 0 {
+        return "", "", "", fmt.Errorf("Город не найден")
+    }
+    lat := data[0]["lat"].(string)
+    lon := data[0]["lon"].(string)
+    displayName := data[0]["display_name"].(string)
+    return lat, lon, displayName, nil
+}
+
+func getWeatherOpenMeteo(lat, lon string) (string, error) {
+    url := fmt.Sprintf("https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current_weather=true", lat, lon)
+    resp, err := http.Get(url)
+    if err != nil {
+        return "", err
+    }
+    defer resp.Body.Close()
+    body, _ := ioutil.ReadAll(resp.Body)
+    var data map[string]interface{}
+    if err := json.Unmarshal(body, &data); err != nil {
+        return "", err
+    }
+    current, ok := data["current_weather"].(map[string]interface{})
+    if !ok {
+        return "", fmt.Errorf("Ошибка разбора данных о погоде")
+    }
+    temp, ok := current["temperature"].(float64)
+    if !ok {
+        return "", fmt.Errorf("Ошибка разбора температуры")
+    }
+    wind, _ := current["windspeed"].(float64)
+    weatherCode := int(current["weathercode"].(float64))
+    description := weatherCodeToDescription(weatherCode)
+    return fmt.Sprintf("Сейчас %.0f°C, %s, ветер %.0f м/с.", temp, description, wind), nil
+}
+
+func weatherCodeToDescription(code int) string {
+    switch code {
+    case 0:
+        return "ясно"
+    case 1, 2, 3:
+        return "переменная облачность"
+    case 45, 48:
+        return "туман"
+    case 51, 53, 55, 56, 57:
+        return "морось"
+    case 61, 63, 65, 66, 67:
+        return "дождь"
+    case 71, 73, 75, 77:
+        return "снег"
+    case 80, 81, 82:
+        return "ливень"
+    case 85, 86:
+        return "снегопад"
+    case 95:
+        return "гроза"
+    case 96, 99:
+        return "гроза с градом"
+    default:
+        return "неизвестная погода"
+    }
+}
+
 func main() {
-    bot, err := tgbotapi.NewBotAPI("yourTokenbot")
+    botToken := "7516491558:AAHOvKu-hZJVDvDKHN0vSpMb9V05ClzZ4W4"
+
+    bot, err := tgbotapi.NewBotAPI(botToken)
     if err != nil {
         log.Panic(err)
     }
+
+    bot.Debug = true
+    log.Printf("Authorized on account %s", bot.Self.UserName)
 
     u := tgbotapi.NewUpdate(0)
     u.Timeout = 60
@@ -23,80 +104,32 @@ func main() {
     updates := bot.GetUpdatesChan(u)
 
     for update := range updates {
-        if update.Message == nil {
+        if update.Message != nil {
+            city := update.Message.Text
+
+        if city == "/start" {
+            msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Введите город, чтобы узнать погоду.")
+            bot.Send(msg)
             continue
         }
 
-        if len(update.Message.Photo) > 0 {
-            photo := update.Message.Photo[len(update.Message.Photo)-1]
-            fileID := photo.FileID
-            file, err := bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
+            lat, lon, displayName, err := getCoordinatesNominatim(city)
             if err != nil {
-                bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка при получении файла"))
+                msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Не могу найти такой город :(")
+                bot.Send(msg)
                 continue
             }
 
-            localFile := "received_image.png"
-            url := file.Link(bot.Token)
-            err = downloadFile(localFile, url)
+            weather, err := getWeatherOpenMeteo(lat, lon)
             if err != nil {
-                bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка скачивания файла"))
+                msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка при получении погоды :(")
+                bot.Send(msg)
                 continue
             }
 
-            text, err := runTesseract(localFile)
-            if err != nil {
-                bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Ошибка при распознавании: "+err.Error()))
-            } else {
-                if strings.TrimSpace(text) == "" {
-                    text = "Текст не распознан"
-                }
-                bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, text))
-            }
-
-            os.Remove(localFile)
-        } else {
-            bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Пожалуйста, отправь фото для распознавания текста"))
+            msg := tgbotapi.NewMessage(update.Message.Chat.ID,
+                fmt.Sprintf("Погода для: %s\n%s", displayName, weather))
+            bot.Send(msg)
         }
     }
-}
-
-func downloadFile(filepath string, url string) error {
-    resp, err := http.Get(url)
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
-
-    out, err := os.Create(filepath)
-    if err != nil {
-        return err
-    }
-    defer out.Close()
-
-    _, err = io.Copy(out, resp.Body)
-    return err
-}
-
-func runTesseract(imagePath string) (string, error) {
-    lang := "rus+eng"
-    cmd := exec.Command("tesseract", imagePath, "stdout", "-l", lang)
-    output, err := cmd.CombinedOutput()
-    lines := strings.Split(string(output), "\n")
-    var resultLines []string
-    for _, line := range lines {
-        trimmed := strings.TrimSpace(line)
-        if trimmed == "" {
-            continue
-        }
-        if strings.HasPrefix(trimmed, "Estimating") ||
-            strings.HasPrefix(trimmed, "Error") ||
-            strings.HasPrefix(trimmed, "Tesseract Open Source") ||
-            strings.HasPrefix(trimmed, "OCR Engine") {
-            continue
-        }
-        resultLines = append(resultLines, trimmed)
-    }
-    result := strings.Join(resultLines, "\n")
-    return result, err
 }
